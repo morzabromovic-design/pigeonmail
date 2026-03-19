@@ -3,11 +3,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 
-# Получаем URL базы данных из переменных окружения (Render сам её добавит)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/pigeonmail")
 
 def init_db():
-    """Создаёт таблицы, если их нет"""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -18,6 +16,7 @@ def init_db():
                     first_name VARCHAR(100),
                     last_name VARCHAR(100),
                     hashed_password TEXT NOT NULL,
+                    avatar_file_id VARCHAR(255),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -30,6 +29,16 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
                     FOREIGN KEY(recipient_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS contacts (
+                    user_id INTEGER NOT NULL,
+                    contact_user_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, contact_user_id),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(contact_user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
             """)
             conn.commit()
