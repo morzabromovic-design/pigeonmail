@@ -8,6 +8,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/pigeonmail
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Таблица пользователей
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -20,17 +21,22 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Таблица сообщений
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
                     sender_id INTEGER NOT NULL,
                     recipient_id INTEGER NOT NULL,
-                    content TEXT NOT NULL,
+                    content TEXT,
+                    attachment_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
                     FOREIGN KEY(recipient_id) REFERENCES users(id) ON DELETE CASCADE
                 )
             """)
+            
+            # Таблица контактов
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS contacts (
                     user_id INTEGER NOT NULL,
@@ -41,6 +47,22 @@ def init_db():
                     FOREIGN KEY(contact_user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
             """)
+            
+            # НОВАЯ ТАБЛИЦА для вложений
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS attachments (
+                    id SERIAL PRIMARY KEY,
+                    file_id VARCHAR(255) UNIQUE NOT NULL,
+                    owner_id INTEGER NOT NULL,
+                    file_name VARCHAR(255) NOT NULL,
+                    file_size BIGINT NOT NULL,
+                    mime_type VARCHAR(100) NOT NULL,
+                    file_url TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
             conn.commit()
 
 @contextmanager
