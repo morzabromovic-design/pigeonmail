@@ -14,13 +14,19 @@
         input { background: #2c3340; color: #fff; border: 1px solid #3a4355; }
         button { background: #5E9BFF; color: #fff; font-weight: bold; cursor: pointer; transition: 0.2s; }
         button:hover { background: #4a7fd1; }
-        .toggle { margin-top: 1rem; color: #aaa; cursor: pointer; text-decoration: underline; }
         #main-screen { display: flex; height: 100%; display: none; }
         .sidebar { width: 30%; background: #171d27; border-right: 1px solid #2c3340; display: flex; flex-direction: column; }
         .sidebar-header { padding: 1rem; border-bottom: 1px solid #2c3340; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
         .user-list { flex: 1; overflow-y: auto; }
-        .user-item { padding: 0.75rem 1rem; border-bottom: 1px solid #2c3340; cursor: pointer; transition: 0.2s; }
+        .user-item { padding: 0.75rem 1rem; border-bottom: 1px solid #2c3340; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; }
         .user-item:hover, .user-item.selected { background: #2c3340; }
+        .remove-contact { color: #ff5e5e; margin-left: 8px; cursor: pointer; font-weight: bold; }
+        .add-contact-btn { background: #3a4355; margin: 0.5rem; padding: 0.5rem; text-align: center; border-radius: 8px; cursor: pointer; }
+        .add-contact-btn:hover { background: #4e5a70; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 1000; }
+        .modal-content { background: #1e2430; padding: 2rem; border-radius: 16px; width: 90%; max-width: 400px; }
+        .modal-content input { margin-bottom: 1rem; }
+        .modal-buttons { display: flex; gap: 0.5rem; }
         .chat-area { flex: 1; display: flex; flex-direction: column; }
         .chat-header { padding: 1rem; border-bottom: 1px solid #2c3340; font-weight: bold; background: #1e2430; }
         .messages { flex: 1; padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; }
@@ -37,7 +43,6 @@
 </head>
 <body>
     <div id="app">
-        <!-- Экран авторизации -->
         <div id="auth-screen">
             <h2 style="margin-bottom: 2rem;">🐦 Голубиная почта</h2>
             <div class="form-group">
@@ -57,13 +62,13 @@
             </div>
         </div>
 
-        <!-- Основной экран чата -->
         <div id="main-screen">
             <div class="sidebar">
                 <div class="sidebar-header">
                     <span>Контакты</span>
                     <button id="logout" onclick="logout()">Выйти</button>
                 </div>
+                <div class="add-contact-btn" onclick="showAddContactModal()">➕ Добавить контакт</div>
                 <div class="user-list" id="user-list"></div>
             </div>
             <div class="chat-area">
@@ -77,8 +82,18 @@
         </div>
     </div>
 
+    <div id="contactModal" class="modal">
+        <div class="modal-content">
+            <h3>Добавить контакт</h3>
+            <input type="text" id="contactPhone" placeholder="Номер телефона" value="">
+            <div class="modal-buttons">
+                <button onclick="addContact()">Добавить</button>
+                <button onclick="hideAddContactModal()">Отмена</button>
+            </div>
+        </div>
+    </div>
+
     <script>
-        // Состояние приложения
         let currentUser = null;
         let token = localStorage.getItem('token');
         let ws = null;
@@ -95,82 +110,61 @@
         const phoneInput = document.getElementById('phone');
         const passwordInput = document.getElementById('password');
         const firstNameInput = document.getElementById('first_name');
+        const contactModal = document.getElementById('contactModal');
+        const contactPhoneInput = document.getElementById('contactPhone');
 
-        // При загрузке страницы проверяем, есть ли сохранённый токен
+        function showAddContactModal() { contactPhoneInput.value = ''; contactModal.style.display = 'flex'; }
+        function hideAddContactModal() { contactModal.style.display = 'none'; }
+
         window.onload = async () => {
             if (token) {
                 try {
-                    const res = await fetch('/api/me', {
-                        headers: { 'Authorization': `Bearer ${token}` }
-                    });
+                    const res = await fetch('/api/me', { headers: { 'Authorization': `Bearer ${token}` } });
                     if (res.ok) {
-                        const userData = await res.json();
-                        currentUser = userData;
-                        await loadUsers();
+                        currentUser = await res.json();
+                        await loadContacts();
                         connectWebSocket();
                         authScreen.style.display = 'none';
                         mainScreen.style.display = 'flex';
                     } else {
-                        localStorage.removeItem('token');
-                        localStorage.removeItem('user');
-                        token = null;
+                        localStorage.removeItem('token'); localStorage.removeItem('user'); token = null;
                     }
-                } catch (e) {
-                    console.error('Ошибка восстановления сессии', e);
-                }
+                } catch (e) { console.error('Ошибка восстановления сессии', e); }
             }
         };
 
         async function register() {
-            const phone = phoneInput.value;
-            const password = passwordInput.value;
-            const firstName = firstNameInput.value;
+            const phone = phoneInput.value, password = passwordInput.value, firstName = firstNameInput.value;
             const res = await fetch('/api/register', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ phone, password, first_name: firstName, last_name: '' })
             });
-            if (res.ok) {
-                alert('Регистрация успешна! Теперь войдите.');
-            } else {
-                const err = await res.text();
-                alert('Ошибка: ' + err);
-            }
+            res.ok ? alert('Регистрация успешна! Теперь войдите.') : alert('Ошибка: ' + await res.text());
         }
 
         async function login() {
-            const phone = phoneInput.value;
-            const password = passwordInput.value;
+            const phone = phoneInput.value, password = passwordInput.value;
             const res = await fetch('/api/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ phone, password })
             });
             if (res.ok) {
                 const data = await res.json();
                 token = data.access_token;
-                currentUser = { id: data.user_id, phone: phone };
+                currentUser = { id: data.user_id, phone };
                 localStorage.setItem('token', token);
                 localStorage.setItem('user', JSON.stringify(currentUser));
-                await loadUsers();
+                await loadContacts();
                 connectWebSocket();
                 authScreen.style.display = 'none';
                 mainScreen.style.display = 'flex';
-            } else {
-                alert('Ошибка входа');
-            }
+            } else alert('Ошибка входа');
         }
 
-        async function loadUsers() {
-            const res = await fetch('/api/users', {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            if (res.ok) {
-                users = await res.json();
-                renderUserList();
-            } else {
-                console.error('Не удалось загрузить пользователей');
-            }
+        async function loadContacts() {
+            const res = await fetch('/api/contacts', { headers: { 'Authorization': `Bearer ${token}` } });
+            if (res.ok) { users = await res.json(); renderUserList(); }
+            else console.error('Не удалось загрузить контакты');
         }
 
         function renderUserList() {
@@ -178,10 +172,40 @@
             users.forEach(u => {
                 const div = document.createElement('div');
                 div.className = `user-item ${selectedUserId === u.id ? 'selected' : ''}`;
-                div.textContent = `${u.first_name || u.phone} ${u.last_name || ''}`;
-                div.onclick = () => selectUser(u.id);
+                div.innerHTML = `<span>${u.first_name || u.phone} ${u.last_name || ''}</span><span class="remove-contact" onclick="removeContact('${u.phone}', event)">✖</span>`;
+                div.onclick = (e) => { if (!e.target.classList.contains('remove-contact')) selectUser(u.id); };
                 userListDiv.appendChild(div);
             });
+        }
+
+        async function addContact() {
+            const phone = contactPhoneInput.value.trim();
+            if (!phone) return;
+            const res = await fetch('/api/contacts/add', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ phone })
+            });
+            if (res.ok) { hideAddContactModal(); await loadContacts(); }
+            else alert('Ошибка добавления: ' + await res.text());
+        }
+
+        async function removeContact(phone, event) {
+            event.stopPropagation();
+            if (!confirm(`Удалить контакт ${phone}?`)) return;
+            const res = await fetch('/api/contacts/remove', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ phone })
+            });
+            if (res.ok) {
+                const removedUser = users.find(u => u.phone === phone);
+                if (removedUser && removedUser.id === selectedUserId) {
+                    selectedUserId = null;
+                    chatHeader.textContent = 'Выберите собеседника';
+                    messageInputContainer.style.display = 'none';
+                    messagesDiv.innerHTML = '';
+                }
+                await loadContacts();
+            } else alert('Ошибка удаления');
         }
 
         async function selectUser(userId) {
@@ -194,14 +218,8 @@
         }
 
         async function loadMessages(otherUserId) {
-            const res = await fetch(`/api/messages/${otherUserId}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            if (res.ok) {
-                const msgs = await res.json();
-                messages[otherUserId] = msgs;
-                renderMessages(otherUserId);
-            }
+            const res = await fetch(`/api/messages/${otherUserId}`, { headers: { 'Authorization': `Bearer ${token}` } });
+            if (res.ok) { messages[otherUserId] = await res.json(); renderMessages(otherUserId); }
         }
 
         function renderMessages(otherUserId) {
@@ -218,59 +236,35 @@
 
         function connectWebSocket() {
             if (ws && ws.readyState === WebSocket.OPEN) return;
-            // Правильно определяем протокол: wss для HTTPS, ws для HTTP
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws`;
-            console.log('Подключение к WebSocket:', wsUrl);
             ws = new WebSocket(wsUrl);
-            ws.onopen = () => {
-                console.log('WebSocket connected');
-                ws.send(JSON.stringify({ token: token }));
-            };
+            ws.onopen = () => { ws.send(JSON.stringify({ token })); };
             ws.onmessage = (event) => {
                 const msg = JSON.parse(event.data);
-                console.log('Received message:', msg);
                 const otherId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
                 if (!messages[otherId]) messages[otherId] = [];
                 messages[otherId].push(msg);
-                if (otherId === selectedUserId) {
-                    renderMessages(selectedUserId);
-                }
+                if (otherId === selectedUserId) renderMessages(selectedUserId);
             };
-            ws.onclose = (event) => {
-                console.log('WebSocket closed', event);
-                setTimeout(connectWebSocket, 2000);
-            };
-            ws.onerror = (err) => {
-                console.error('WebSocket error', err);
-            };
+            ws.onclose = () => setTimeout(connectWebSocket, 2000);
+            ws.onerror = (err) => console.error('WebSocket error', err);
         }
 
         function sendMessage() {
             const input = document.getElementById('message-text');
             const content = input.value.trim();
             if (!content || !selectedUserId) return;
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                alert('Соединение потеряно, переподключаемся...');
-                connectWebSocket();
-                return;
-            }
-            ws.send(JSON.stringify({
-                recipient_id: selectedUserId,
-                content: content
-            }));
+            if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Соединение потеряно, переподключаемся...'); connectWebSocket(); return; }
+            ws.send(JSON.stringify({ recipient_id: selectedUserId, content }));
             input.value = '';
         }
 
         function logout() {
             if (ws) ws.close();
-            localStorage.removeItem('token');
-            localStorage.removeItem('user');
-            token = null;
-            currentUser = null;
-            selectedUserId = null;
-            authScreen.style.display = 'flex';
-            mainScreen.style.display = 'none';
+            localStorage.removeItem('token'); localStorage.removeItem('user');
+            token = null; currentUser = null; selectedUserId = null;
+            authScreen.style.display = 'flex'; mainScreen.style.display = 'none';
         }
     </script>
 </body>
