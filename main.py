@@ -4,16 +4,12 @@ import traceback
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from database import init_db, get_db
 from auth import verify_password, get_password_hash, create_access_token, decode_token
 
 app = FastAPI(title="Pigeon Mail")
-
-# Инициализация БД при старте
 init_db()
-
-# Подключаем статические файлы
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ---------- Pydantic модели ----------
@@ -31,6 +27,26 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: int
+
+class ContactAdd(BaseModel):
+    phone: str
+
+class ContactRemove(BaseModel):
+    phone: str
+
+class UserOut(BaseModel):
+    id: int
+    phone: str
+    first_name: Optional[str]
+    last_name: Optional[str]
+
+# ---------- Вспомогательная функция ----------
+def get_current_user(request: Request):
+    token = request.headers.get("authorization", "").replace("Bearer ", "")
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return int(payload["sub"])
 
 # ---------- REST endpoints ----------
 @app.post("/api/register", response_model=TokenResponse)
@@ -82,13 +98,9 @@ def login(user: UserLogin):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/api/me")
-def get_current_user(request: Request):
+def get_current_user_endpoint(request: Request):
     try:
-        token = request.headers.get("authorization", "").replace("Bearer ", "")
-        payload = decode_token(token)
-        if not payload:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        user_id = int(payload["sub"])
+        user_id = get_current_user(request)
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -108,40 +120,99 @@ def get_current_user(request: Request):
         print("="*50)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.get("/api/users")
-def get_users(request: Request):
+# ==================== КОНТАКТЫ ====================
+@app.get("/api/contacts", response_model=List[UserOut])
+def get_contacts(request: Request):
     try:
-        token = request.headers.get("authorization", "").replace("Bearer ", "")
-        payload = decode_token(token)
-        if not payload:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        current_user_id = int(payload["sub"])
+        user_id = get_current_user(request)
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, phone, first_name, last_name
-                    FROM users
-                    WHERE id != %s
-                """, (current_user_id,))
+                    SELECT u.id, u.phone, u.first_name, u.last_name
+                    FROM users u
+                    JOIN contacts c ON u.id = c.contact_user_id
+                    WHERE c.user_id = %s
+                    ORDER BY u.first_name, u.phone
+                """, (user_id,))
                 rows = cur.fetchall()
         return [dict(r) for r in rows]
     except HTTPException:
         raise
     except Exception as e:
         print("="*50)
-        print("Ошибка в /api/users:")
+        print("Ошибка в /api/contacts:")
         traceback.print_exc()
         print("="*50)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@app.post("/api/contacts/add")
+def add_contact(contact: ContactAdd, request: Request):
+    try:
+        user_id = get_current_user(request)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE phone = %s", (contact.phone,))
+                target = cur.fetchone()
+                if not target:
+                    raise HTTPException(status_code=404, detail="User not found")
+                contact_user_id = target["id"]
+                if user_id == contact_user_id:
+                    raise HTTPException(status_code=400, detail="Cannot add yourself")
+                cur.execute("""
+                    SELECT 1 FROM contacts WHERE user_id = %s AND contact_user_id = %s
+                """, (user_id, contact_user_id))
+                if cur.fetchone():
+                    raise HTTPException(status_code=400, detail="Contact already exists")
+                cur.execute("""
+                    INSERT INTO contacts (user_id, contact_user_id) VALUES (%s, %s)
+                """, (user_id, contact_user_id))
+                conn.commit()
+        return {"message": "Contact added"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/contacts/add:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/api/contacts/remove")
+def remove_contact(contact: ContactRemove, request: Request):
+    try:
+        user_id = get_current_user(request)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE phone = %s", (contact.phone,))
+                target = cur.fetchone()
+                if not target:
+                    raise HTTPException(status_code=404, detail="User not found")
+                contact_user_id = target["id"]
+                cur.execute("""
+                    DELETE FROM contacts WHERE user_id = %s AND contact_user_id = %s
+                """, (user_id, contact_user_id))
+                if cur.rowcount == 0:
+                    raise HTTPException(status_code=404, detail="Contact not found")
+                conn.commit()
+        return {"message": "Contact removed"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/contacts/remove:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# Для обратной совместимости старый /api/users теперь возвращает контакты
+@app.get("/api/users", response_model=List[UserOut])
+def get_users(request: Request):
+    return get_contacts(request)
+
 @app.get("/api/messages/{user_id}")
 def get_messages(user_id: int, request: Request):
     try:
-        token = request.headers.get("authorization", "").replace("Bearer ", "")
-        payload = decode_token(token)
-        if not payload:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        current_user_id = int(payload["sub"])
+        current_user_id = get_current_user(request)
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -160,7 +231,7 @@ def get_messages(user_id: int, request: Request):
         print("="*50)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# ---------- WebSocket менеджер ----------
+# ---------- WebSocket ----------
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, WebSocket] = {}
@@ -175,10 +246,6 @@ class ConnectionManager:
     async def send_personal_message(self, message: dict, user_id: int):
         if user_id in self.active_connections:
             await self.active_connections[user_id].send_json(message)
-
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections.values():
-            await connection.send_json(message)
 
 manager = ConnectionManager()
 
