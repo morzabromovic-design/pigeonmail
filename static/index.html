@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Голубиная почта</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0e14; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        #app { width: 90%; max-width: 1200px; background: #1e2430; border-radius: 16px; box-shadow: 0 8px 20px rgba(0,0,0,0.5); overflow: hidden; display: flex; flex-direction: column; height: 90vh; }
+        #auth-screen { padding: 2rem; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
+        .form-group { width: 100%; max-width: 400px; margin-bottom: 1rem; }
+        input, button { width: 100%; padding: 0.75rem; border: none; border-radius: 8px; font-size: 1rem; }
+        input { background: #2c3340; color: #fff; border: 1px solid #3a4355; }
+        button { background: #5E9BFF; color: #fff; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #4a7fd1; }
+        .toggle { margin-top: 1rem; color: #aaa; cursor: pointer; text-decoration: underline; }
+        #main-screen { display: flex; height: 100%; display: none; }
+        .sidebar { width: 30%; background: #171d27; border-right: 1px solid #2c3340; display: flex; flex-direction: column; }
+        .sidebar-header { padding: 1rem; border-bottom: 1px solid #2c3340; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
+        .user-list { flex: 1; overflow-y: auto; }
+        .user-item { padding: 0.75rem 1rem; border-bottom: 1px solid #2c3340; cursor: pointer; transition: 0.2s; }
+        .user-item:hover, .user-item.selected { background: #2c3340; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; }
+        .chat-header { padding: 1rem; border-bottom: 1px solid #2c3340; font-weight: bold; background: #1e2430; }
+        .messages { flex: 1; padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; }
+        .message { max-width: 70%; margin-bottom: 0.75rem; padding: 0.5rem 1rem; border-radius: 18px; word-wrap: break-word; }
+        .message.sent { align-self: flex-end; background: #5E9BFF; color: #fff; }
+        .message.received { align-self: flex-start; background: #2c3340; color: #fff; }
+        .message small { display: block; font-size: 0.7rem; opacity: 0.7; margin-top: 0.2rem; }
+        .message-input { display: flex; padding: 1rem; border-top: 1px solid #2c3340; }
+        .message-input input { flex: 1; margin-right: 0.5rem; }
+        .message-input button { width: auto; padding: 0.75rem 1.5rem; }
+        #logout { background: none; border: 1px solid #5E9BFF; color: #5E9BFF; padding: 0.3rem 0.8rem; width: auto; cursor: pointer; border-radius: 5px; }
+        .online-indicator { width: 10px; height: 10px; background: #4caf50; border-radius: 50%; display: inline-block; margin-right: 8px; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <!-- Экран авторизации -->
+        <div id="auth-screen">
+            <h2 style="margin-bottom: 2rem;">🐦 Голубиная почта</h2>
+            <div class="form-group">
+                <input type="text" id="phone" placeholder="Номер телефона" value="+79001234567">
+            </div>
+            <div class="form-group">
+                <input type="password" id="password" placeholder="Пароль" value="123456">
+            </div>
+            <div class="form-group">
+                <input type="text" id="first_name" placeholder="Имя (опционально, только при регистрации)">
+            </div>
+            <div class="form-group">
+                <button onclick="register()">Зарегистрироваться</button>
+            </div>
+            <div class="form-group">
+                <button onclick="login()">Войти</button>
+            </div>
+        </div>
+
+        <!-- Основной экран чата -->
+        <div id="main-screen">
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <span>Контакты</span>
+                    <button id="logout" onclick="logout()">Выйти</button>
+                </div>
+                <div class="user-list" id="user-list"></div>
+            </div>
+            <div class="chat-area">
+                <div class="chat-header" id="chat-header">Выберите собеседника</div>
+                <div class="messages" id="messages"></div>
+                <div class="message-input" id="message-input-container" style="display: none;">
+                    <input type="text" id="message-text" placeholder="Напишите сообщение..." onkeypress="if(event.key==='Enter') sendMessage()">
+                    <button onclick="sendMessage()">➤</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Состояние приложения
+        let currentUser = null;          // {id, phone, first_name, last_name}
+        let token = localStorage.getItem('token'); // восстанавливаем токен
+        let ws = null;
+        let selectedUserId = null;
+        let users = [];
+        let messages = {};                // { [otherUserId]: [...] }
+
+        // DOM элементы
+        const authScreen = document.getElementById('auth-screen');
+        const mainScreen = document.getElementById('main-screen');
+        const userListDiv = document.getElementById('user-list');
+        const messagesDiv = document.getElementById('messages');
+        const chatHeader = document.getElementById('chat-header');
+        const messageInputContainer = document.getElementById('message-input-container');
+        const phoneInput = document.getElementById('phone');
+        const passwordInput = document.getElementById('password');
+        const firstNameInput = document.getElementById('first_name');
+
+        // При загрузке страницы проверяем, есть ли сохранённый токен
+        window.onload = async () => {
+            if (token) {
+                // Попробуем восстановить сессию: получим данные пользователя
+                try {
+                    const res = await fetch('/api/me', {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (res.ok) {
+                        const userData = await res.json();
+                        currentUser = userData;
+                        await loadUsers();
+                        connectWebSocket();
+                        authScreen.style.display = 'none';
+                        mainScreen.style.display = 'flex';
+                    } else {
+                        // Токен недействителен
+                        localStorage.removeItem('token');
+                        localStorage.removeItem('user');
+                        token = null;
+                    }
+                } catch (e) {
+                    console.error('Ошибка восстановления сессии', e);
+                }
+            }
+        };
+
+        // Регистрация
+        async function register() {
+            const phone = phoneInput.value;
+            const password = passwordInput.value;
+            const firstName = firstNameInput.value;
+            const res = await fetch('/api/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phone, password, first_name: firstName, last_name: '' })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                alert('Регистрация успешна! Теперь войдите.');
+                // Не логинимся автоматически, ждём кнопку входа
+            } else {
+                const err = await res.text();
+                alert('Ошибка: ' + err);
+            }
+        }
+
+        // Вход
+        async function login() {
+            const phone = phoneInput.value;
+            const password = passwordInput.value;
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phone, password })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                token = data.access_token;
+                currentUser = { id: data.user_id, phone: phone };
+                // Сохраняем токен и данные пользователя
+                localStorage.setItem('token', token);
+                localStorage.setItem('user', JSON.stringify(currentUser));
+                await loadUsers();
+                connectWebSocket();
+                authScreen.style.display = 'none';
+                mainScreen.style.display = 'flex';
+            } else {
+                alert('Ошибка входа');
+            }
+        }
+
+        // Загрузка списка пользователей
+        async function loadUsers() {
+            const res = await fetch('/api/users', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (res.ok) {
+                users = await res.json();
+                renderUserList();
+            } else {
+                console.error('Не удалось загрузить пользователей');
+            }
+        }
+
+        function renderUserList() {
+            userListDiv.innerHTML = '';
+            users.forEach(u => {
+                const div = document.createElement('div');
+                div.className = `user-item ${selectedUserId === u.id ? 'selected' : ''}`;
+                div.textContent = `${u.first_name || u.phone} ${u.last_name || ''}`;
+                div.onclick = () => selectUser(u.id);
+                userListDiv.appendChild(div);
+            });
+        }
+
+        // Выбор собеседника
+        async function selectUser(userId) {
+            selectedUserId = userId;
+            renderUserList();
+            const user = users.find(u => u.id === userId);
+            chatHeader.textContent = `Чат с ${user ? (user.first_name || user.phone) : '...'}`;
+            messageInputContainer.style.display = 'flex';
+            await loadMessages(userId);
+        }
+
+        async function loadMessages(otherUserId) {
+            const res = await fetch(`/api/messages/${otherUserId}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (res.ok) {
+                const msgs = await res.json();
+                messages[otherUserId] = msgs;
+                renderMessages(otherUserId);
+            }
+        }
+
+        function renderMessages(otherUserId) {
+            const msgs = messages[otherUserId] || [];
+            messagesDiv.innerHTML = '';
+            msgs.forEach(m => {
+                const div = document.createElement('div');
+                div.className = `message ${m.sender_id === currentUser.id ? 'sent' : 'received'}`;
+                div.innerHTML = `${m.content} <small>${new Date(m.created_at).toLocaleTimeString()}</small>`;
+                messagesDiv.appendChild(div);
+            });
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // WebSocket соединение
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+            const wsUrl = `ws://${window.location.host}/ws`;
+            ws = new WebSocket(wsUrl);
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                // Отправляем токен для аутентификации
+                ws.send(JSON.stringify({ token: token }));
+            };
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                console.log('Received message:', msg);
+                const otherId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
+                if (!messages[otherId]) messages[otherId] = [];
+                messages[otherId].push(msg);
+                if (otherId === selectedUserId) {
+                    renderMessages(selectedUserId);
+                }
+            };
+            ws.onclose = () => {
+                console.log('WebSocket closed, reconnecting...');
+                setTimeout(connectWebSocket, 2000);
+            };
+            ws.onerror = (err) => {
+                console.error('WebSocket error', err);
+            };
+        }
+
+        // Отправка сообщения
+        function sendMessage() {
+            const input = document.getElementById('message-text');
+            const content = input.value.trim();
+            if (!content || !selectedUserId) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Соединение потеряно, переподключаемся...');
+                connectWebSocket();
+                return;
+            }
+            ws.send(JSON.stringify({
+                recipient_id: selectedUserId,
+                content: content
+            }));
+            input.value = '';
+        }
+
+        // Выход
+        function logout() {
+            if (ws) ws.close();
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+            token = null;
+            currentUser = null;
+            selectedUserId = null;
+            authScreen.style.display = 'flex';
+            mainScreen.style.display = 'none';
+        }
+
+        // Дополнительный эндпоинт /api/me для получения данных пользователя по токену
+        // (нужно добавить на сервер, см. примечание ниже)
+    </script>
+</body>
+</html>

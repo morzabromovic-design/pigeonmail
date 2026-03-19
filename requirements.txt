@@ -1,0 +1,7 @@
+fastapi[all]
+uvicorn
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+websockets
+psycopg2-binary
