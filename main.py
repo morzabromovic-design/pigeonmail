@@ -1,5 +1,6 @@
 import json
 import os
+import traceback
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -12,7 +13,7 @@ app = FastAPI(title="Pigeon Mail")
 # Инициализация БД при старте
 init_db()
 
-# Подключаем статические файлы (HTML, CSS, JS)
+# Подключаем статические файлы
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ---------- Pydantic модели ----------
@@ -31,95 +32,133 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user_id: int
 
-class MessageOut(BaseModel):
-    id: int
-    sender_id: int
-    recipient_id: int
-    content: str
-    created_at: str
-
 # ---------- REST endpoints ----------
 @app.post("/api/register", response_model=TokenResponse)
 def register(user: UserRegister):
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE phone = %s", (user.phone,))
-            existing = cur.fetchone()
-            if existing:
-                raise HTTPException(status_code=400, detail="Phone already registered")
-            hashed = get_password_hash(user.password)
-            cur.execute("""
-                INSERT INTO users (phone, first_name, last_name, hashed_password)
-                VALUES (%s, %s, %s, %s) RETURNING id
-            """, (user.phone, user.first_name, user.last_name, hashed))
-            user_id = cur.fetchone()["id"]
-            conn.commit()
-    token = create_access_token({"sub": str(user_id)})
-    return TokenResponse(access_token=token, user_id=user_id)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE phone = %s", (user.phone,))
+                existing = cur.fetchone()
+                if existing:
+                    raise HTTPException(status_code=400, detail="Phone already registered")
+                hashed = get_password_hash(user.password)
+                cur.execute("""
+                    INSERT INTO users (phone, first_name, last_name, hashed_password)
+                    VALUES (%s, %s, %s, %s) RETURNING id
+                """, (user.phone, user.first_name, user.last_name, hashed))
+                user_id = cur.fetchone()["id"]
+                conn.commit()
+        token = create_access_token({"sub": str(user_id)})
+        return TokenResponse(access_token=token, user_id=user_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/register:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/api/login", response_model=TokenResponse)
 def login(user: UserLogin):
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE phone = %s", (user.phone,))
-            db_user = cur.fetchone()
-            if not db_user or not verify_password(user.password, db_user["hashed_password"]):
-                raise HTTPException(status_code=401, detail="Invalid credentials")
-            user_id = db_user["id"]
-    token = create_access_token({"sub": str(user_id)})
-    return TokenResponse(access_token=token, user_id=user_id)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users WHERE phone = %s", (user.phone,))
+                db_user = cur.fetchone()
+                if not db_user or not verify_password(user.password, db_user["hashed_password"]):
+                    raise HTTPException(status_code=401, detail="Invalid credentials")
+                user_id = db_user["id"]
+        token = create_access_token({"sub": str(user_id)})
+        return TokenResponse(access_token=token, user_id=user_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/login:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/api/me")
 def get_current_user(request: Request):
-    token = request.headers.get("authorization", "").replace("Bearer ", "")
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    user_id = int(payload["sub"])
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, phone, first_name, last_name FROM users WHERE id = %s",
-                (user_id,)
-            )
-            user = cur.fetchone()
-            if not user:
-                raise HTTPException(status_code=404, detail="User not found")
-            return dict(user)
+    try:
+        token = request.headers.get("authorization", "").replace("Bearer ", "")
+        payload = decode_token(token)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = int(payload["sub"])
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, phone, first_name, last_name FROM users WHERE id = %s",
+                    (user_id,)
+                )
+                user = cur.fetchone()
+                if not user:
+                    raise HTTPException(status_code=404, detail="User not found")
+                return dict(user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/me:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/api/users")
 def get_users(request: Request):
-    token = request.headers.get("authorization", "").replace("Bearer ", "")
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    current_user_id = int(payload["sub"])
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, phone, first_name, last_name
-                FROM users
-                WHERE id != %s
-            """, (current_user_id,))
-            rows = cur.fetchall()
-    return [dict(r) for r in rows]
+    try:
+        token = request.headers.get("authorization", "").replace("Bearer ", "")
+        payload = decode_token(token)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        current_user_id = int(payload["sub"])
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, phone, first_name, last_name
+                    FROM users
+                    WHERE id != %s
+                """, (current_user_id,))
+                rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/users:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/api/messages/{user_id}")
 def get_messages(user_id: int, request: Request):
-    token = request.headers.get("authorization", "").replace("Bearer ", "")
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    current_user_id = int(payload["sub"])
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT * FROM messages
-                WHERE (sender_id = %s AND recipient_id = %s) OR (sender_id = %s AND recipient_id = %s)
-                ORDER BY created_at ASC
-            """, (current_user_id, user_id, user_id, current_user_id))
-            rows = cur.fetchall()
-    return [dict(r) for r in rows]
+    try:
+        token = request.headers.get("authorization", "").replace("Bearer ", "")
+        payload = decode_token(token)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        current_user_id = int(payload["sub"])
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM messages
+                    WHERE (sender_id = %s AND recipient_id = %s) OR (sender_id = %s AND recipient_id = %s)
+                    ORDER BY created_at ASC
+                """, (current_user_id, user_id, user_id, current_user_id))
+                rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/messages:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # ---------- WebSocket менеджер ----------
 class ConnectionManager:
@@ -157,6 +196,7 @@ async def websocket_endpoint(websocket: WebSocket):
         user_id = int(payload["sub"])
     except Exception as e:
         print(f"WebSocket auth error: {e}")
+        traceback.print_exc()
         await websocket.close(code=1008)
         return
 
@@ -193,4 +233,8 @@ async def websocket_endpoint(websocket: WebSocket):
             await manager.send_personal_message(out_msg, user_id)
 
     except WebSocketDisconnect:
+        manager.disconnect(user_id)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        traceback.print_exc()
         manager.disconnect(user_id)
