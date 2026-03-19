@@ -34,15 +34,24 @@
         .message.sent { align-self: flex-end; background: #5E9BFF; color: #fff; }
         .message.received { align-self: flex-start; background: #2c3340; color: #fff; }
         .message small { display: block; font-size: 0.7rem; opacity: 0.7; margin-top: 0.2rem; }
-        .message-input { display: flex; padding: 1rem; border-top: 1px solid #2c3340; }
-        .message-input input { flex: 1; margin-right: 0.5rem; }
-        .message-input button { width: auto; padding: 0.75rem 1.5rem; }
+        .message-image { max-width: 200px; max-height: 200px; border-radius: 8px; margin-top: 4px; cursor: pointer; }
+        .message-file { display: flex; align-items: center; background: #3a4355; padding: 8px; border-radius: 8px; margin-top: 4px; text-decoration: none; color: #fff; }
+        .message-file:hover { background: #4e5a70; }
+        .file-icon { margin-right: 8px; font-size: 1.2rem; }
+        .message-input { display: flex; padding: 1rem; border-top: 1px solid #2c3340; gap: 0.5rem; }
+        .message-input input[type="text"] { flex: 1; }
+        .message-input input[type="file"] { display: none; }
+        .attach-btn { background: #3a4355; padding: 0.75rem; border-radius: 8px; cursor: pointer; }
+        .attach-btn:hover { background: #4e5a70; }
+        .file-preview { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+        .file-preview-item { background: #2c3340; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; }
         #logout { background: none; border: 1px solid #5E9BFF; color: #5E9BFF; padding: 0.3rem 0.8rem; width: auto; cursor: pointer; border-radius: 5px; }
         .online-indicator { width: 10px; height: 10px; background: #4caf50; border-radius: 50%; display: inline-block; margin-right: 8px; }
     </style>
 </head>
 <body>
     <div id="app">
+        <!-- Экран авторизации -->
         <div id="auth-screen">
             <h2 style="margin-bottom: 2rem;">🐦 Голубиная почта</h2>
             <div class="form-group">
@@ -62,6 +71,7 @@
             </div>
         </div>
 
+        <!-- Основной экран чата -->
         <div id="main-screen">
             <div class="sidebar">
                 <div class="sidebar-header">
@@ -75,13 +85,17 @@
                 <div class="chat-header" id="chat-header">Выберите собеседника</div>
                 <div class="messages" id="messages"></div>
                 <div class="message-input" id="message-input-container" style="display: none;">
+                    <input type="file" id="file-input" multiple onchange="handleFileSelect(event)">
+                    <span class="attach-btn" onclick="document.getElementById('file-input').click()">📎</span>
                     <input type="text" id="message-text" placeholder="Напишите сообщение..." onkeypress="if(event.key==='Enter') sendMessage()">
                     <button onclick="sendMessage()">➤</button>
                 </div>
+                <div id="file-preview" class="file-preview"></div>
             </div>
         </div>
     </div>
 
+    <!-- Модальное окно добавления контакта -->
     <div id="contactModal" class="modal">
         <div class="modal-content">
             <h3>Добавить контакт</h3>
@@ -94,12 +108,14 @@
     </div>
 
     <script>
+        // Состояние приложения
         let currentUser = null;
         let token = localStorage.getItem('token');
         let ws = null;
         let selectedUserId = null;
         let users = [];
         let messages = {};
+        let pendingFiles = []; // файлы, выбранные для отправки
 
         const authScreen = document.getElementById('auth-screen');
         const mainScreen = document.getElementById('main-screen');
@@ -107,6 +123,7 @@
         const messagesDiv = document.getElementById('messages');
         const chatHeader = document.getElementById('chat-header');
         const messageInputContainer = document.getElementById('message-input-container');
+        const filePreview = document.getElementById('file-preview');
         const phoneInput = document.getElementById('phone');
         const passwordInput = document.getElementById('password');
         const firstNameInput = document.getElementById('first_name');
@@ -115,6 +132,38 @@
 
         function showAddContactModal() { contactPhoneInput.value = ''; contactModal.style.display = 'flex'; }
         function hideAddContactModal() { contactModal.style.display = 'none'; }
+
+        // Обработка выбора файлов
+        function handleFileSelect(event) {
+            const files = Array.from(event.target.files);
+            files.forEach(file => {
+                pendingFiles.push(file);
+                const previewItem = document.createElement('div');
+                previewItem.className = 'file-preview-item';
+                previewItem.textContent = `📄 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+                previewItem.dataset.filename = file.name;
+                filePreview.appendChild(previewItem);
+            });
+            event.target.value = ''; // очищаем input, чтобы можно было выбрать тот же файл снова
+        }
+
+        // Загрузка файла на сервер
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            const res = await fetch('/api/upload', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` },
+                body: formData
+            });
+            
+            if (res.ok) {
+                return await res.json();
+            } else {
+                throw new Error('Upload failed');
+            }
+        }
 
         window.onload = async () => {
             if (token) {
@@ -219,7 +268,10 @@
 
         async function loadMessages(otherUserId) {
             const res = await fetch(`/api/messages/${otherUserId}`, { headers: { 'Authorization': `Bearer ${token}` } });
-            if (res.ok) { messages[otherUserId] = await res.json(); renderMessages(otherUserId); }
+            if (res.ok) { 
+                messages[otherUserId] = await res.json(); 
+                renderMessages(otherUserId); 
+            }
         }
 
         function renderMessages(otherUserId) {
@@ -228,10 +280,74 @@
             msgs.forEach(m => {
                 const div = document.createElement('div');
                 div.className = `message ${m.sender_id === currentUser.id ? 'sent' : 'received'}`;
-                div.innerHTML = `${m.content} <small>${new Date(m.created_at).toLocaleTimeString()}</small>`;
+                
+                let contentHtml = '';
+                if (m.content) {
+                    contentHtml += `<div>${m.content}</div>`;
+                }
+                
+                if (m.attachment) {
+                    const att = m.attachment;
+                    if (att.mime_type.startsWith('image/')) {
+                        contentHtml += `<img src="${att.file_url}" class="message-image" onclick="window.open('${att.file_url}')" title="${att.file_name}">`;
+                    } else {
+                        contentHtml += `
+                            <a href="${att.file_url}" target="_blank" class="message-file">
+                                <span class="file-icon">📎</span>
+                                <span>${att.file_name} (${(att.file_size / 1024).toFixed(1)} KB)</span>
+                            </a>
+                        `;
+                    }
+                }
+                
+                div.innerHTML = `${contentHtml} <small>${new Date(m.created_at).toLocaleTimeString()}</small>`;
                 messagesDiv.appendChild(div);
             });
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Отправка сообщения с файлами
+        async function sendMessage() {
+            const input = document.getElementById('message-text');
+            const content = input.value.trim();
+            
+            if (!selectedUserId) return;
+            if (!content && pendingFiles.length === 0) return;
+            
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Соединение потеряно, переподключаемся...');
+                connectWebSocket();
+                return;
+            }
+            
+            // Если есть файлы, сначала загружаем их
+            if (pendingFiles.length > 0) {
+                for (const file of pendingFiles) {
+                    try {
+                        const uploadResult = await uploadFile(file);
+                        // Отправляем сообщение с attachment_id
+                        ws.send(JSON.stringify({
+                            recipient_id: selectedUserId,
+                            content: content || null,
+                            attachment_id: uploadResult.attachment_id
+                        }));
+                    } catch (error) {
+                        console.error('File upload failed:', error);
+                        alert(`Ошибка загрузки файла ${file.name}`);
+                    }
+                }
+                // Очищаем очередь файлов и превью
+                pendingFiles = [];
+                filePreview.innerHTML = '';
+                input.value = '';
+            } else {
+                // Просто текстовое сообщение
+                ws.send(JSON.stringify({
+                    recipient_id: selectedUserId,
+                    content: content
+                }));
+                input.value = '';
+            }
         }
 
         function connectWebSocket() {
@@ -249,15 +365,6 @@
             };
             ws.onclose = () => setTimeout(connectWebSocket, 2000);
             ws.onerror = (err) => console.error('WebSocket error', err);
-        }
-
-        function sendMessage() {
-            const input = document.getElementById('message-text');
-            const content = input.value.trim();
-            if (!content || !selectedUserId) return;
-            if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Соединение потеряно, переподключаемся...'); connectWebSocket(); return; }
-            ws.send(JSON.stringify({ recipient_id: selectedUserId, content }));
-            input.value = '';
         }
 
         function logout() {
