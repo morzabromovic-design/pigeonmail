@@ -79,14 +79,13 @@
 
     <script>
         // Состояние приложения
-        let currentUser = null;          // {id, phone, first_name, last_name}
-        let token = localStorage.getItem('token'); // восстанавливаем токен
+        let currentUser = null;
+        let token = localStorage.getItem('token');
         let ws = null;
         let selectedUserId = null;
         let users = [];
-        let messages = {};                // { [otherUserId]: [...] }
+        let messages = {};
 
-        // DOM элементы
         const authScreen = document.getElementById('auth-screen');
         const mainScreen = document.getElementById('main-screen');
         const userListDiv = document.getElementById('user-list');
@@ -100,7 +99,6 @@
         // При загрузке страницы проверяем, есть ли сохранённый токен
         window.onload = async () => {
             if (token) {
-                // Попробуем восстановить сессию: получим данные пользователя
                 try {
                     const res = await fetch('/api/me', {
                         headers: { 'Authorization': `Bearer ${token}` }
@@ -113,7 +111,6 @@
                         authScreen.style.display = 'none';
                         mainScreen.style.display = 'flex';
                     } else {
-                        // Токен недействителен
                         localStorage.removeItem('token');
                         localStorage.removeItem('user');
                         token = null;
@@ -124,7 +121,6 @@
             }
         };
 
-        // Регистрация
         async function register() {
             const phone = phoneInput.value;
             const password = passwordInput.value;
@@ -135,16 +131,13 @@
                 body: JSON.stringify({ phone, password, first_name: firstName, last_name: '' })
             });
             if (res.ok) {
-                const data = await res.json();
                 alert('Регистрация успешна! Теперь войдите.');
-                // Не логинимся автоматически, ждём кнопку входа
             } else {
                 const err = await res.text();
                 alert('Ошибка: ' + err);
             }
         }
 
-        // Вход
         async function login() {
             const phone = phoneInput.value;
             const password = passwordInput.value;
@@ -157,7 +150,6 @@
                 const data = await res.json();
                 token = data.access_token;
                 currentUser = { id: data.user_id, phone: phone };
-                // Сохраняем токен и данные пользователя
                 localStorage.setItem('token', token);
                 localStorage.setItem('user', JSON.stringify(currentUser));
                 await loadUsers();
@@ -169,7 +161,6 @@
             }
         }
 
-        // Загрузка списка пользователей
         async function loadUsers() {
             const res = await fetch('/api/users', {
                 headers: { 'Authorization': `Bearer ${token}` }
@@ -193,7 +184,6 @@
             });
         }
 
-        // Выбор собеседника
         async function selectUser(userId) {
             selectedUserId = userId;
             renderUserList();
@@ -226,14 +216,15 @@
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
 
-        // WebSocket соединение
         function connectWebSocket() {
             if (ws && ws.readyState === WebSocket.OPEN) return;
-            const wsUrl = `ws://${window.location.host}/ws`;
+            // Правильно определяем протокол: wss для HTTPS, ws для HTTP
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            console.log('Подключение к WebSocket:', wsUrl);
             ws = new WebSocket(wsUrl);
             ws.onopen = () => {
                 console.log('WebSocket connected');
-                // Отправляем токен для аутентификации
                 ws.send(JSON.stringify({ token: token }));
             };
             ws.onmessage = (event) => {
@@ -246,8 +237,8 @@
                     renderMessages(selectedUserId);
                 }
             };
-            ws.onclose = () => {
-                console.log('WebSocket closed, reconnecting...');
+            ws.onclose = (event) => {
+                console.log('WebSocket closed', event);
                 setTimeout(connectWebSocket, 2000);
             };
             ws.onerror = (err) => {
@@ -255,7 +246,6 @@
             };
         }
 
-        // Отправка сообщения
         function sendMessage() {
             const input = document.getElementById('message-text');
             const content = input.value.trim();
@@ -272,7 +262,6 @@
             input.value = '';
         }
 
-        // Выход
         function logout() {
             if (ws) ws.close();
             localStorage.removeItem('token');
@@ -283,9 +272,6 @@
             authScreen.style.display = 'flex';
             mainScreen.style.display = 'none';
         }
-
-        // Дополнительный эндпоинт /api/me для получения данных пользователя по токену
-        // (нужно добавить на сервер, см. примечание ниже)
     </script>
 </body>
 </html>
