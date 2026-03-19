@@ -1,8 +1,12 @@
 import json
 import os
+import uuid
+import shutil
 import traceback
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from pathlib import Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, File, UploadFile, Form
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from database import init_db, get_db
@@ -11,6 +15,11 @@ from auth import verify_password, get_password_hash, create_access_token, decode
 app = FastAPI(title="Pigeon Mail")
 init_db()
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Создаём папку для загрузок (для локального хранения)
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # ---------- Pydantic модели ----------
 class UserRegister(BaseModel):
@@ -39,6 +48,22 @@ class UserOut(BaseModel):
     phone: str
     first_name: Optional[str]
     last_name: Optional[str]
+
+class AttachmentOut(BaseModel):
+    id: int
+    file_id: str
+    file_name: str
+    file_size: int
+    mime_type: str
+    file_url: str
+
+class MessageOut(BaseModel):
+    id: int
+    sender_id: int
+    recipient_id: int
+    content: Optional[str]
+    attachment: Optional[AttachmentOut]
+    created_at: str
 
 # ---------- Вспомогательная функция ----------
 def get_current_user(request: Request):
@@ -204,11 +229,72 @@ def remove_contact(contact: ContactRemove, request: Request):
         print("="*50)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# Для обратной совместимости старый /api/users теперь возвращает контакты
-@app.get("/api/users", response_model=List[UserOut])
-def get_users(request: Request):
-    return get_contacts(request)
+# ==================== ФАЙЛЫ ====================
+@app.post("/api/upload")
+async def upload_file(request: Request, file: UploadFile = File(...)):
+    """Загружает файл на сервер и возвращает attachment_id"""
+    try:
+        user_id = get_current_user(request)
+        
+        # Генерируем уникальный file_id
+        file_id = str(uuid.uuid4())
+        file_extension = Path(file.filename).suffix
+        safe_filename = f"{file_id}{file_extension}"
+        file_path = UPLOAD_DIR / safe_filename
+        
+        # Сохраняем файл локально
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        file_size = file_path.stat().st_size
+        
+        # Для продакшна здесь нужно загружать в S3, а локально сохраняем URL
+        file_url = f"/uploads/{safe_filename}"
+        
+        # Сохраняем в базу данных
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO attachments (file_id, owner_id, file_name, file_size, mime_type, file_url)
+                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+                """, (file_id, user_id, file.filename, file_size, file.content_type or "application/octet-stream", file_url))
+                attachment_id = cur.fetchone()["id"]
+                conn.commit()
+        
+        return {"attachment_id": attachment_id, "file_id": file_id, "file_url": file_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/upload:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@app.get("/api/attachments/{attachment_id}", response_model=AttachmentOut)
+def get_attachment(attachment_id: int, request: Request):
+    """Возвращает информацию о вложении"""
+    try:
+        user_id = get_current_user(request)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM attachments WHERE id = %s
+                """, (attachment_id,))
+                attachment = cur.fetchone()
+                if not attachment:
+                    raise HTTPException(status_code=404, detail="Attachment not found")
+                return dict(attachment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("="*50)
+        print("Ошибка в /api/attachments:")
+        traceback.print_exc()
+        print("="*50)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# ==================== СООБЩЕНИЯ ====================
 @app.get("/api/messages/{user_id}")
 def get_messages(user_id: int, request: Request):
     try:
@@ -216,12 +302,35 @@ def get_messages(user_id: int, request: Request):
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT * FROM messages
-                    WHERE (sender_id = %s AND recipient_id = %s) OR (sender_id = %s AND recipient_id = %s)
-                    ORDER BY created_at ASC
+                    SELECT m.*, 
+                           a.id as attachment_id, a.file_id, a.file_name, a.file_size, a.mime_type, a.file_url
+                    FROM messages m
+                    LEFT JOIN attachments a ON m.attachment_id = a.id
+                    WHERE (m.sender_id = %s AND m.recipient_id = %s) OR (m.sender_id = %s AND m.recipient_id = %s)
+                    ORDER BY m.created_at ASC
                 """, (current_user_id, user_id, user_id, current_user_id))
                 rows = cur.fetchall()
-        return [dict(r) for r in rows]
+                
+                result = []
+                for row in rows:
+                    msg = dict(row)
+                    if msg.get("attachment_id"):
+                        msg["attachment"] = {
+                            "id": msg["attachment_id"],
+                            "file_id": msg["file_id"],
+                            "file_name": msg["file_name"],
+                            "file_size": msg["file_size"],
+                            "mime_type": msg["mime_type"],
+                            "file_url": msg["file_url"]
+                        }
+                    else:
+                        msg["attachment"] = None
+                    # Удаляем лишние поля
+                    for field in ["attachment_id", "file_id", "file_name", "file_size", "mime_type", "file_url"]:
+                        if field in msg:
+                            del msg[field]
+                    result.append(msg)
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -231,7 +340,7 @@ def get_messages(user_id: int, request: Request):
         print("="*50)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# ---------- WebSocket ----------
+# ==================== WEBSOCKET ====================
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, WebSocket] = {}
@@ -275,18 +384,30 @@ async def websocket_endpoint(websocket: WebSocket):
             message = json.loads(data)
             recipient_id = message.get("recipient_id")
             content = message.get("content")
-            if not recipient_id or not content:
+            attachment_id = message.get("attachment_id")  # опционально
+            
+            if (not content and not attachment_id) or not recipient_id:
                 continue
 
             with get_db() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO messages (sender_id, recipient_id, content)
-                        VALUES (%s, %s, %s) RETURNING id, created_at
-                    """, (user_id, recipient_id, content))
+                        INSERT INTO messages (sender_id, recipient_id, content, attachment_id)
+                        VALUES (%s, %s, %s, %s) RETURNING id, created_at
+                    """, (user_id, recipient_id, content, attachment_id))
                     inserted = cur.fetchone()
                     msg_id = inserted["id"]
                     created_at = inserted["created_at"]
+                    
+                    # Если есть вложение, получаем его данные
+                    attachment = None
+                    if attachment_id:
+                        cur.execute("""
+                            SELECT id, file_id, file_name, file_size, mime_type, file_url
+                            FROM attachments WHERE id = %s
+                        """, (attachment_id,))
+                        attachment = cur.fetchone()
+                    
                     conn.commit()
 
             out_msg = {
@@ -294,6 +415,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "sender_id": user_id,
                 "recipient_id": recipient_id,
                 "content": content,
+                "attachment": dict(attachment) if attachment else None,
                 "created_at": created_at.isoformat() if created_at else None
             }
             await manager.send_personal_message(out_msg, recipient_id)
